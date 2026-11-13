@@ -7,6 +7,9 @@ const km = require("../kmmovies.js");
 
 const TMDB_API_KEY = "439c478a771f35c05022f9feabcca01c";
 const PROVIDER_TIMEOUT_MS = 45000;
+const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+// Hosts the /peek diagnostic page is allowed to fetch (link pages only).
+const PEEK_HOSTS = /(^|\.)(magiclinks\.lol|kmcloud\.lol|kmmovies\.[a-z]+|4khdhub\.[a-z]+|hubcloud\.[a-z]+|hubdrive\.[a-z]+|gdflix\.[a-z]+|gadgetsweb\.[a-z]+)$/i;
 const PROVIDERS = [
   { id: "4khdhub", getStreams: hub.getStreams },
   { id: "kmmovies", getStreams: km.getStreams }
@@ -93,13 +96,46 @@ async function getAllStreams(type, id) {
       return list || [];
     })
   ));
-  return lists.flat().map((s) => ({
+  // Best first across both sites: highest resolution, then biggest file.
+  const heightOf = (s) => parseInt(s.quality, 10) || parseInt(((s.name || "").match(/(\d{3,4})p\b/) || [])[1], 10) || 0;
+  const sizeOf = (s) => {
+    const last = String(s.title || "").split("\n").pop();
+    const m = last.match(/([\d.]+)\s*(TB|GB|MB|KB)\b/i);
+    if (!m) return 0;
+    return parseFloat(m[1]) * { TB: 1e12, GB: 1e9, MB: 1e6, KB: 1e3 }[m[2].toUpperCase()];
+  };
+  const all = lists.flat().sort((a, b) => heightOf(b) - heightOf(a) || sizeOf(b) - sizeOf(a));
+  return all.map((s) => ({
     name: s.name,
     title: s.title,
     description: s.title,
     url: s.url,
     behaviorHints: Object.assign({ notWebReady: true }, s.behaviorHints || {})
   }));
+}
+
+// Shows the raw HTML of a link page so the scraper can be fixed when a site changes.
+async function peek(target) {
+  let host = "";
+  try {
+    host = new URL(target).hostname;
+  } catch (e) {
+    return "Invalid url";
+  }
+  if (!PEEK_HOSTS.test(host)) return "Host not allowed: " + host;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 12000);
+  try {
+    const r = await fetch(target, { signal: controller.signal, headers: { "User-Agent": USER_AGENT, Accept: "text/html,*/*" } });
+    const type = r.headers.get("content-type") || "";
+    if (!/text|html|json|javascript/i.test(type)) return `STATUS ${r.status}  FINAL ${r.url}  TYPE ${type}\n(not a page, body not shown)`;
+    const body = (await r.text()).slice(0, 300000);
+    return `STATUS ${r.status}  FINAL ${r.url}  TYPE ${type}\n\n${body}`;
+  } catch (e) {
+    return "Fetch failed: " + (e && e.name === "AbortError" ? "timed out" : e && e.message);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function landingPage(base) {
@@ -142,13 +178,21 @@ module.exports = async (req, res) => {
 
   if (path === "" || path === "/") return send(res, 200, landingPage(base));
   if (path === "/manifest.json") return send(res, 200, MANIFEST, { "Cache-Control": "public, max-age=3600" });
+  if (path === "/peek") {
+    const text = await peek(u.searchParams.get("url") || "");
+    res.statusCode = 200;
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    res.setHeader("Cache-Control", "no-store");
+    return res.end(text);
+  }
 
   const m = path.match(/^\/stream\/(movie|series)\/(.+)\.json$/);
   if (m) {
     try {
       const streams = await getAllStreams(m[1], decodeURIComponent(m[2]));
       return send(res, 200, { streams }, {
-        "Cache-Control": streams.length ? "public, s-maxage=1800, stale-while-revalidate=3600" : "no-store"
+        "Cache-Control": streams.length ? "public, s-maxage=600, stale-while-revalidate=600" : "no-store"
       });
     } catch (e) {
       console.log(`[addon] Error: ${e && e.stack}`);
