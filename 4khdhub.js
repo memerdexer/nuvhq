@@ -55,6 +55,8 @@ var CONCURRENCY = 8;
 // Per-request timeout (ms). Ignored if the runtime has no AbortController.
 var REQUEST_TIMEOUT = 2e4;
 var HEAD_TIMEOUT = 1e4;
+// Stop starting new downloads after this long and return what was found.
+var TIME_BUDGET_MS = 3e4;
 // Only show files at this resolution or higher (1080 = 1080p, 1440p, 2160p/4K).
 var MIN_HEIGHT = 1080;
 // Files whose resolution can't be detected are hidden unless this is true.
@@ -915,7 +917,8 @@ function getStreams(tmdbId, type, season, episode) {
       console.log(`[4KHDHub] ${found.length} item(s) on ${pageUrls[idx]} (${skipped} below ${MIN_HEIGHT}p skipped)`);
     });
     console.log(`[4KHDHub] Processing ${items.length} items`);
-    const perItem = yield mapLimit(items, CONCURRENCY, (it) => processItem(it.$, it.el));
+    const deadline = Date.now() + TIME_BUDGET_MS;
+    const perItem = yield mapLimit(items, CONCURRENCY, (it) => Date.now() > deadline ? [] : processItem(it.$, it.el));
     const seenUrls = /* @__PURE__ */ new Set();
     const streams = [];
     perItem.forEach((list) => {

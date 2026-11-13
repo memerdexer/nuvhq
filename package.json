@@ -1,0 +1,10 @@
+{
+  "name": "nuvhq",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Nuvio plugins + add-on: 4KHDHub and KMMovies, 1080p and 4K only",
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "cheerio-without-node-native": "0.20.2"
+  }
+}

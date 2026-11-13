@@ -1,12 +1,12 @@
 {
   "name": "HQ Providers (1080p+)",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "scrapers": [
     {
       "id": "4khdhub-hq",
       "name": "4KHDHub (1080p+)",
       "description": "4KHDHub direct links, 1080p and 4K only: FSL, 10Gbps, PixelServer, BuzzServer, R2, S3, GDrive, HBPlay",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "author": "Custom",
       "supportedTypes": [
         "movie",
@@ -27,7 +27,7 @@
       "id": "kmmovies-hq",
       "name": "KMMovies (1080p+)",
       "description": "KMMovies direct links, 1080p and 4K only: HubCloud, GDFlix, PixelDrain, KMCloud",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "author": "Custom",
       "supportedTypes": [
         "movie",

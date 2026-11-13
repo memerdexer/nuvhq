@@ -58,6 +58,8 @@ var MAX_DEPTH = 3;
 var MAX_LINKS_PER_PAGE = 12;
 var REQUEST_TIMEOUT = 2e4;
 var HEAD_TIMEOUT = 1e4;
+// Stop starting new downloads after this long and return what was found.
+var TIME_BUDGET_MS = 3e4;
 // Only show files at this resolution or higher (1080 = 1080p, 1440p, 2160p/4K).
 var MIN_HEIGHT = 1080;
 // Files whose resolution can't be detected are hidden unless this is true.
@@ -1002,7 +1004,10 @@ function getStreams(tmdbId, type, season, episode) {
       console.log(`${TAG} ${links.length} download button(s) on ${postUrls[i]} (${all.length - links.length} below ${MIN_HEIGHT}p skipped)`);
       links.forEach((l) => jobs.push({ link: l, referer: postUrls[i] }));
     });
+    const deadline = Date.now() + TIME_BUDGET_MS;
     const perLink = yield mapLimit(jobs, CONCURRENCY, (job) => {
+      if (Date.now() > deadline)
+        return [];
       const meta = {
         title: "",
         label: job.link.text,
