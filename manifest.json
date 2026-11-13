@@ -1,32 +1,49 @@
 {
   "name": "HQ Providers (1080p+)",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "scrapers": [
     {
       "id": "4khdhub-hq",
       "name": "4KHDHub (1080p+)",
       "description": "4KHDHub direct links, 1080p and 4K only: FSL, 10Gbps, PixelServer, BuzzServer, R2, S3, GDrive, HBPlay",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "author": "Custom",
-      "supportedTypes": ["movie", "tv"],
-      "filename": "providers/4khdhub.js",
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
+      "filename": "4khdhub.js",
       "enabled": true,
-      "formats": ["mkv", "mp4"],
+      "formats": [
+        "mkv",
+        "mp4"
+      ],
       "logo": "https://www.google.com/s2/favicons?domain=4khdhub.one&sz=128",
-      "contentLanguage": ["en"]
+      "contentLanguage": [
+        "en"
+      ]
     },
     {
       "id": "kmmovies-hq",
       "name": "KMMovies (1080p+)",
       "description": "KMMovies direct links, 1080p and 4K only: HubCloud, GDFlix, PixelDrain, KMCloud",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "author": "Custom",
-      "supportedTypes": ["movie", "tv"],
-      "filename": "providers/kmmovies.js",
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
+      "filename": "kmmovies.js",
       "enabled": true,
-      "formats": ["mkv", "mp4"],
+      "formats": [
+        "mkv",
+        "mp4"
+      ],
       "logo": "https://www.google.com/s2/favicons?domain=kmmovies.beer&sz=128",
-      "contentLanguage": ["hi", "en"]
+      "contentLanguage": [
+        "hi",
+        "en"
+      ]
     }
   ]
 }
