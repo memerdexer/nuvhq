@@ -53,10 +53,25 @@ var MAX_PAGES = 4;
 // How many download items are processed at the same time.
 var CONCURRENCY = 8;
 // Per-request timeout (ms). Ignored if the runtime has no AbortController.
-var REQUEST_TIMEOUT = 2e4;
+var REQUEST_TIMEOUT = 12e3;
 var HEAD_TIMEOUT = 1e4;
-// Stop starting new downloads after this long and return what was found.
-var TIME_BUDGET_MS = 3e4;
+// After this long (from the start of a request), no new downloads are started.
+var TIME_BUDGET_MS = 22e3;
+// After this long, return whatever links are finished, even if some are still loading.
+var HARD_LIMIT_MS = 36e3;
+function raceDeadline(promise, deadline) {
+  const ms = deadline - Date.now();
+  if (ms <= 0)
+    return Promise.resolve([]);
+  let timer;
+  const stop = new Promise((resolve) => {
+    timer = setTimeout(() => resolve([]), ms);
+  });
+  return Promise.race([promise, stop]).then((v) => {
+    clearTimeout(timer);
+    return v;
+  });
+}
 // Only show files at this resolution or higher (1080 = 1080p, 1440p, 2160p/4K).
 var MIN_HEIGHT = 1080;
 // Files whose resolution can't be detected are hidden unless this is true.
@@ -88,13 +103,14 @@ function fetchLatestDomain() {
       console.log(`[4KHDHub] domains.json fetch failed: ${e && e.message}`);
     }
     const candidates = unique([remote].concat(KNOWN_DOMAINS));
-    for (const d of candidates) {
-      if (yield probeDomain(d)) {
-        domainCache.url = d;
+    const alive = yield Promise.all(candidates.map((d) => probeDomain(d)));
+    for (let i = 0; i < candidates.length; i++) {
+      if (alive[i]) {
+        domainCache.url = candidates[i];
         domainCache.ts = now;
-        return d;
+        return candidates[i];
       }
-      console.log(`[4KHDHub] Domain ${d} unreachable, trying next`);
+      console.log(`[4KHDHub] Domain ${candidates[i]} unreachable`);
     }
     console.log("[4KHDHub] All domains unreachable, using primary");
     return candidates[0] || BASE_URL;
@@ -123,7 +139,7 @@ function withTimeout(init, timeoutMs) {
 }
 function fetchText(_0) {
   return __async(this, arguments, function* (url, options = {}) {
-    const retries = options.retries !== void 0 ? options.retries : 2;
+    const retries = options.retries !== void 0 ? options.retries : 1;
     const delay = options.delay !== void 0 ? options.delay : 1e3;
     const timeout = options.timeout !== void 0 ? options.timeout : REQUEST_TIMEOUT;
     for (let i = 0; i <= retries; i++) {
@@ -579,6 +595,8 @@ function classifyServer(text, href, isButton) {
     return null;
   if (/hubcloud\.php|hubcloud[^/]*\/drive\//.test(h))
     return null;
+  if (/telegram|\/tg\//.test(t + " " + h))
+    return null;
   if (/hbplay\.pages\.dev/.test(h))
     return { label: "HBPlay", kind: "hbplay" };
   if (/video-downloads\.googleusercontent\.com|drive\.google\.com/.test(h))
@@ -611,7 +629,7 @@ function classifyServer(text, href, isButton) {
     let label = (bracket ? bracket[1] : text.replace(/download/gi, "")).replace(/\s+/g, " ").trim();
     if (!label || label.length > 30)
       label = "Mirror";
-    return { label, kind: "direct" };
+    return { label, kind: "probe" };
   }
   return null;
 }
@@ -690,25 +708,58 @@ function resolve10Gbps(link) {
     return link;
   });
 }
+var IS_SERVER = typeof process !== "undefined" && !!(process.versions && process.versions.node);
+// BuzzHeavier: /<id>/download answers with the real file address in a header.
 function resolveBuzz(link) {
   return __async(this, null, function* () {
-    const base = link.replace(/\/+$/, "").replace(/\/download$/, "");
+    const base = link.replace(/[?#].*$/, "").replace(/\/+$/, "").replace(/\/download$/, "");
     const target = base + "/download";
-    const res = yield headRequest(target, { Referer: base, "HX-Request": "true" });
-    if (!res)
-      return null;
-    const hx = res.headers && res.headers.get ? res.headers.get("hx-redirect") : null;
-    if (hx)
-      return absoluteUrl(hx, base);
-    if (res.url && res.url !== target && !/buzzheavier/i.test(res.url))
-      return res.url;
-    return null;
+    const pick = (res) => {
+      if (!res || !res.headers || !res.headers.get)
+        return null;
+      const v = res.headers.get("hx-redirect") || res.headers.get("location");
+      return v ? absoluteUrl(v, base) : null;
+    };
+    const head = yield headRequest(target, { Referer: base, "HX-Request": "true" });
+    let found = pick(head);
+    if (!found && head && head.url && head.url !== target && !/buzzheavier|bzzhr/i.test(head.url))
+      found = head.url;
+    if (!found && IS_SERVER) {
+      // On a server the redirect header can be read without following it,
+      // so the video itself is never downloaded.
+      const t = withTimeout({ method: "GET", redirect: "manual", headers: { "User-Agent": USER_AGENT, Referer: base, "HX-Request": "true" } }, HEAD_TIMEOUT);
+      try {
+        const res = yield fetch(target, t.init);
+        t.clear();
+        found = pick(res);
+        try {
+          if (res.body && res.body.cancel)
+            res.body.cancel();
+        } catch (e) {
+        }
+      } catch (e) {
+        t.clear();
+        console.log(`BuzzHeavier lookup failed for ${link}: ${e && e.message}`);
+      }
+    }
+    return found;
   });
 }
 function resolveServerLink(candidate) {
   return __async(this, null, function* () {
     if (candidate.kind === "pixel")
       return toPixeldrainDirect(candidate.href);
+    if (candidate.kind === "probe") {
+      // Unknown button: keep it only if it actually serves a video file.
+      const res = yield headRequest(candidate.href);
+      if (!res || (res.status || 200) >= 400)
+        return null;
+      const type = (res.headers && res.headers.get ? res.headers.get("content-type") || "" : "").toLowerCase();
+      const disp = (res.headers && res.headers.get ? res.headers.get("content-disposition") || "" : "").toLowerCase();
+      const len = parseInt(res.headers && res.headers.get ? res.headers.get("content-length") : 0) || 0;
+      const isMedia = /^video\/|octet-stream|matroska/.test(type) || disp.indexOf("attachment") !== -1 || len > 50 * 1024 * 1024 && type.indexOf("html") === -1;
+      return isMedia ? res.url || candidate.href : null;
+    }
     if (candidate.kind === "hbplay") {
       const decoded = decodeWrappedUrl(candidate.href);
       return decoded ? toPixeldrainDirect(decoded) : null;
@@ -880,6 +931,7 @@ ${formatBytes(link.meta.bytes || 0)}`,
 // -----------------------------------------------------------------------------
 function getStreams(tmdbId, type, season, episode) {
   return __async(this, null, function* () {
+    const startedAt = Date.now();
     const tmdbDetails = yield getTmdbDetails(tmdbId, type);
     if (!tmdbDetails || !tmdbDetails.title)
       return [];
@@ -912,13 +964,16 @@ function getStreams(tmdbId, type, season, episode) {
           skipped++;
           return;
         }
-        items.push({ $, el });
+        items.push({ $, el, height });
       });
       console.log(`[4KHDHub] ${found.length} item(s) on ${pageUrls[idx]} (${skipped} below ${MIN_HEIGHT}p skipped)`);
     });
+    // 2160p first, so the best files are done before any time limit.
+    items.sort((a, b) => (b.height || 0) - (a.height || 0));
     console.log(`[4KHDHub] Processing ${items.length} items`);
-    const deadline = Date.now() + TIME_BUDGET_MS;
-    const perItem = yield mapLimit(items, CONCURRENCY, (it) => Date.now() > deadline ? [] : processItem(it.$, it.el));
+    const softDeadline = startedAt + TIME_BUDGET_MS;
+    const hardDeadline = startedAt + HARD_LIMIT_MS;
+    const perItem = yield mapLimit(items, CONCURRENCY, (it) => Date.now() > softDeadline ? [] : raceDeadline(processItem(it.$, it.el), hardDeadline));
     const seenUrls = /* @__PURE__ */ new Set();
     const streams = [];
     perItem.forEach((list) => {

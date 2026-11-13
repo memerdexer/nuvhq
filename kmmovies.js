@@ -56,10 +56,25 @@ var CONCURRENCY = 6;
 var MAX_DEPTH = 3;
 // Max buttons followed on a single unknown link page.
 var MAX_LINKS_PER_PAGE = 12;
-var REQUEST_TIMEOUT = 2e4;
+var REQUEST_TIMEOUT = 12e3;
 var HEAD_TIMEOUT = 1e4;
-// Stop starting new downloads after this long and return what was found.
-var TIME_BUDGET_MS = 3e4;
+// After this long (from the start of a request), no new downloads are started.
+var TIME_BUDGET_MS = 22e3;
+// After this long, return whatever links are finished, even if some are still loading.
+var HARD_LIMIT_MS = 36e3;
+function raceDeadline(promise, deadline) {
+  const ms = deadline - Date.now();
+  if (ms <= 0)
+    return Promise.resolve([]);
+  let timer;
+  const stop = new Promise((resolve) => {
+    timer = setTimeout(() => resolve([]), ms);
+  });
+  return Promise.race([promise, stop]).then((v) => {
+    clearTimeout(timer);
+    return v;
+  });
+}
 // Only show files at this resolution or higher (1080 = 1080p, 1440p, 2160p/4K).
 var MIN_HEIGHT = 1080;
 // Files whose resolution can't be detected are hidden unless this is true.
@@ -73,7 +88,9 @@ function isLowQualityLabel(text) {
 }
 
 var SKIP_URL = /(?:t\.me\/|telegram\.|facebook\.com|twitter\.com|\/\/x\.com|whatsapp\.com|instagram\.com|imdb\.com|youtube\.com|youtu\.be|discord|play\.google|apps\.apple|^mailto:|^javascript:)/i;
-var KNOWN_PAGE_HOSTS = /kmcloud|magiclinks|hubcloud|hubdrive|gdflix|gdlink|kmmovies/i;
+var KNOWN_PAGE_HOSTS = /kmcloud|magiclinks|hubcloud|hubdrive|gdflix|gdlink|kmmovies|skydrop|vikingfile/i;
+// Hosts whose files need a login, cookies or decryption, so a player can't use them.
+var UNPLAYABLE_HOSTS = /gofile\.io|transfer\.it|mega\.nz|mega\.io|mediafire\.com/i;
 var RESERVED_SLUGS = /^(category|genre|tag|page|actor|director|writer|year|trending|browse|request|faq|contact-us|about-us|site-disclaimer|privacy-policy|dmca|wp-content|wp-json|wp-admin|author|feed|search|comments|login|register)$/i;
 
 // -----------------------------------------------------------------------------
@@ -98,7 +115,7 @@ function withTimeout(init, timeoutMs) {
 }
 function fetchText(_0) {
   return __async(this, arguments, function* (url, options = {}) {
-    const retries = options.retries !== void 0 ? options.retries : 2;
+    const retries = options.retries !== void 0 ? options.retries : 1;
     const delay = options.delay !== void 0 ? options.delay : 1e3;
     const timeout = options.timeout !== void 0 ? options.timeout : REQUEST_TIMEOUT;
     for (let i = 0; i <= retries; i++) {
@@ -348,6 +365,12 @@ function hostLabel(url) {
   const name = parts.length >= 2 ? parts[parts.length - 2] : h;
   if (/kmcloud/i.test(name))
     return "KMCloud";
+  if (/buzzheavier|bzzhr/i.test(h))
+    return "BuzzHeavier";
+  if (/skydrop/i.test(h))
+    return "SkyDrop";
+  if (/vikingfile/i.test(h))
+    return "VikingFile";
   return name ? name.charAt(0).toUpperCase() + name.slice(1) : "Direct";
 }
 function decodeEntities(s) {
@@ -629,19 +652,41 @@ function resolveRedirect(link) {
     return link;
   });
 }
+var IS_SERVER = typeof process !== "undefined" && !!(process.versions && process.versions.node);
+// BuzzHeavier: /<id>/download answers with the real file address in a header.
 function resolveBuzz(link) {
   return __async(this, null, function* () {
-    const base = link.replace(/\/+$/, "").replace(/\/download$/, "");
+    const base = link.replace(/[?#].*$/, "").replace(/\/+$/, "").replace(/\/download$/, "");
     const target = base + "/download";
-    const res = yield headRequest(target, { Referer: base, "HX-Request": "true" });
-    if (!res)
-      return null;
-    const hx = res.headers && res.headers.get ? res.headers.get("hx-redirect") : null;
-    if (hx)
-      return absoluteUrl(hx, base);
-    if (res.url && res.url !== target && !/buzzheavier/i.test(res.url))
-      return res.url;
-    return null;
+    const pick = (res) => {
+      if (!res || !res.headers || !res.headers.get)
+        return null;
+      const v = res.headers.get("hx-redirect") || res.headers.get("location");
+      return v ? absoluteUrl(v, base) : null;
+    };
+    const head = yield headRequest(target, { Referer: base, "HX-Request": "true" });
+    let found = pick(head);
+    if (!found && head && head.url && head.url !== target && !/buzzheavier|bzzhr/i.test(head.url))
+      found = head.url;
+    if (!found && IS_SERVER) {
+      // On a server the redirect header can be read without following it,
+      // so the video itself is never downloaded.
+      const t = withTimeout({ method: "GET", redirect: "manual", headers: { "User-Agent": USER_AGENT, Referer: base, "HX-Request": "true" } }, HEAD_TIMEOUT);
+      try {
+        const res = yield fetch(target, t.init);
+        t.clear();
+        found = pick(res);
+        try {
+          if (res.body && res.body.cancel)
+            res.body.cancel();
+        } catch (e) {
+        }
+      } catch (e) {
+        t.clear();
+        console.log(`BuzzHeavier lookup failed for ${link}: ${e && e.message}`);
+      }
+    }
+    return found;
   });
 }
 function resolveServerLink(c) {
@@ -872,6 +917,14 @@ function resolveAny(url, ctx, depth, seen) {
       return [makeLink("PixelDrain", toPixeldrainDirect(url), ctx.meta)];
     if (isFileLikeUrl(url))
       return [makeLink(hostLabel(url), url, ctx.meta)];
+    if (UNPLAYABLE_HOSTS.test(lower)) {
+      console.log(`${TAG} Skipping ${hostOf(url)} (needs login or decryption, can't be played directly)`);
+      return [];
+    }
+    if (/buzzheavier|bzzhr/.test(lower)) {
+      const direct = yield resolveBuzz(url);
+      return direct ? [makeLink("BuzzHeavier", direct, ctx.meta)] : [];
+    }
     if (/hubcloud\.|hubcloud\.php|gamerxyt/.test(lower))
       return yield extractHubCloud(url, ctx.meta);
     if (/gdflix|gdlink/.test(lower))
@@ -926,24 +979,35 @@ function parseLinkPage(html, pageUrl, ctx, depth, seen) {
     const pageHost = hostOf(pageUrl);
     const epMap = ctx.episode ? labelAnchorsWithEpisodes($) : null;
     let candidates = [];
-    $("a[href]").each((_, a) => {
-      const href = absoluteUrl($(a).attr("href"), pageUrl);
-      if (!href || href === pageUrl || seen.has(href) || SKIP_URL.test(href))
+    const picked = /* @__PURE__ */ new Set();
+    const addCandidate = (el, rawHref) => {
+      const href = absoluteUrl(rawHref, pageUrl);
+      if (!href || href === pageUrl || seen.has(href) || picked.has(href) || SKIP_URL.test(href))
         return;
-      if (epMap && epMap.get(a) !== ctx.episode)
+      if (epMap && el.name === "a" && epMap.get(el) !== ctx.episode)
         return;
-      const text = ($(a).text() || $(a).attr("title") || "").replace(/\s+/g, " ").trim();
+      const text = ($(el).text() || $(el).attr("title") || "").replace(/\s+/g, " ").trim();
       if (isLowQualityLabel(text))
         return;
       const lh = href.toLowerCase();
-      const known = /hubcloud|hubdrive|gdflix|gdlink|pixeldra|kmcloud/.test(lh) || isFileLikeUrl(href);
-      const isButton = /btn|button/i.test($(a).attr("class") || "");
+      if (UNPLAYABLE_HOSTS.test(lh) || /^\s*(gofile|transfer\s*it|mega)\s*$/i.test(text))
+        return;
+      const known = /hubcloud|hubdrive|gdflix|gdlink|pixeldra|kmcloud|buzzheavier|bzzhr|skydrop|vikingfile/.test(lh) || /skydrop|buzz|viking|10\s*gbps/i.test(text) || isFileLikeUrl(href);
+      const isButton = el.name === "button" || /btn|button/i.test($(el).attr("class") || "");
       const looksLikeDownload = /download|server|mirror|watch|stream|play|instant|direct|cloud|drive|\b\d{3,4}p\b/i.test(text);
       if (!known && !isButton && !looksLikeDownload)
         return;
       if (!known && hostOf(href) === pageHost && !/download|direct|\bdl\b|file/i.test(text + " " + lh))
         return;
+      picked.add(href);
       candidates.push({ href, text, known });
+    };
+    $("a[href]").each((_, a) => addCandidate(a, $(a).attr("href")));
+    // Buttons that open their link with JavaScript instead of a normal link.
+    $("[onclick], [data-href], [data-url], [data-link]").each((_, el) => {
+      const raw = $(el).attr("data-href") || $(el).attr("data-url") || $(el).attr("data-link") || (String($(el).attr("onclick") || "").match(/https?:\/\/[^'"\s)]+/) || [])[0];
+      if (raw)
+        addCandidate(el, raw);
     });
     if (redirect && !seen.has(redirect))
       candidates.unshift({ href: redirect, text: "", known: true });
@@ -980,6 +1044,7 @@ function keepResult(link, season, episode) {
 }
 function getStreams(tmdbId, type, season, episode) {
   return __async(this, null, function* () {
+    const startedAt = Date.now();
     const tmdb = yield getTmdbDetails(tmdbId, type);
     if (!tmdb || !tmdb.title)
       return [];
@@ -1004,9 +1069,12 @@ function getStreams(tmdbId, type, season, episode) {
       console.log(`${TAG} ${links.length} download button(s) on ${postUrls[i]} (${all.length - links.length} below ${MIN_HEIGHT}p skipped)`);
       links.forEach((l) => jobs.push({ link: l, referer: postUrls[i] }));
     });
-    const deadline = Date.now() + TIME_BUDGET_MS;
+    // 2160p first (then bigger files), so the best files are done before any time limit.
+    jobs.sort((a, b) => detectHeight(b.link.text) - detectHeight(a.link.text) || parseBytes(b.link.text) - parseBytes(a.link.text));
+    const softDeadline = startedAt + TIME_BUDGET_MS;
+    const hardDeadline = startedAt + HARD_LIMIT_MS;
     const perLink = yield mapLimit(jobs, CONCURRENCY, (job) => {
-      if (Date.now() > deadline)
+      if (Date.now() > softDeadline)
         return [];
       const meta = {
         title: "",
@@ -1015,10 +1083,10 @@ function getStreams(tmdbId, type, season, episode) {
         bytes: wantsEpisode ? 0 : parseBytes(job.link.text)
       };
       const ctx = { meta, season: wantsEpisode ? s : null, episode: wantsEpisode ? e : null, referer: job.referer };
-      return resolveAny(job.link.url, ctx, 0, /* @__PURE__ */ new Set()).catch((err) => {
+      return raceDeadline(resolveAny(job.link.url, ctx, 0, /* @__PURE__ */ new Set()).catch((err) => {
         console.log(`${TAG} Link error: ${err && err.message}`);
         return [];
-      });
+      }), hardDeadline);
     });
     const seenUrls = /* @__PURE__ */ new Set();
     const entries = [];
